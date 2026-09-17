@@ -3,15 +3,13 @@
  *
  * Wraps Supabase Auth to provide a clean API for:
  * - User sign-up / sign-in / sign-out
+ * - Real email validation and verification enforcement
  * - Session state tracking
  * - Admin role detection
  *
  * Admin status is read from `profiles.is_admin` (checked server-side by
  * Postgres Row Level Security — see supabase/schema.sql), NOT from
- * comparing the signed-in email against a public env var. An email string
- * baked into the client bundle can only ever be a UI convenience; it can't
- * be the actual access control, since anyone can read it out of the bundle
- * and it says nothing about which *account* Postgres will actually trust.
+ * comparing the signed-in email against a public env var.
  *
  * Falls back to a no-op offline mode when Supabase isn't configured.
  */
@@ -25,6 +23,15 @@ class AuthService {
     this._isAdmin = false;
     this._listeners = new Set();
     this._initialized = false;
+  }
+
+  /**
+   * Validate email syntax. Requires standard name@domain.tld format.
+   */
+  isValidEmail(email) {
+    if (!email || typeof email !== 'string') return false;
+    const re = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    return re.test(email.trim());
   }
 
   /**
@@ -67,30 +74,47 @@ class AuthService {
 
   /**
    * Sign up a new user with email and password.
+   * Enforces email syntax and returns needsEmailVerification if email confirmation is required.
    * @param {string} email
    * @param {string} password
    * @param {string} [displayName]
-   * @returns {Promise<{user: object|null, error: string|null}>}
+   * @returns {Promise<{user: object|null, error: string|null, needsEmailVerification?: boolean}>}
    */
   async signUp(email, password, displayName) {
     const supabase = getSupabase();
     if (!supabase) return { user: null, error: 'Supabase is not configured.' };
 
+    const cleanEmail = (email || '').trim();
+    if (!this.isValidEmail(cleanEmail)) {
+      return { user: null, error: 'Please enter a valid, real email address (e.g. name@example.com).' };
+    }
+
     const { data, error } = await supabase.auth.signUp({
-      email: email.trim(),
+      email: cleanEmail,
       password,
       options: {
         data: {
-          display_name: displayName || email.split('@')[0],
+          display_name: displayName || cleanEmail.split('@')[0],
         },
       },
     });
 
     if (error) return { user: null, error: error.message };
+
+    // If email confirmation is enabled in Supabase, data.session will be null
+    // until the user clicks the confirmation link in their email inbox.
+    const isConfirmed = !!(data.session || data.user?.confirmed_at || data.user?.email_confirmed_at);
+    if (!isConfirmed) {
+      this._user = null;
+      this._isAdmin = false;
+      this._notifyListeners();
+      return { user: data.user, error: null, needsEmailVerification: true };
+    }
+
     this._user = data.user;
     await this._refreshAdminFlag();
     this._notifyListeners();
-    return { user: data.user, error: null };
+    return { user: data.user, error: null, needsEmailVerification: false };
   }
 
   /**
@@ -103,16 +127,44 @@ class AuthService {
     const supabase = getSupabase();
     if (!supabase) return { user: null, error: 'Supabase is not configured.' };
 
+    const cleanEmail = (email || '').trim();
+    if (!this.isValidEmail(cleanEmail)) {
+      return { user: null, error: 'Please enter a valid email address.' };
+    }
+
     const { data, error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
+      email: cleanEmail,
       password,
     });
 
-    if (error) return { user: null, error: error.message };
+    if (error) {
+      if (error.message && error.message.toLowerCase().includes('not confirmed')) {
+        return {
+          user: null,
+          error: 'Your email has not been verified yet. Please check your inbox (and spam folder) for the confirmation link sent by Supabase.',
+        };
+      }
+      return { user: null, error: error.message };
+    }
+
     this._user = data.user;
     await this._refreshAdminFlag();
     this._notifyListeners();
     return { user: data.user, error: null };
+  }
+
+  /**
+   * Resend a verification email to a registered user.
+   */
+  async resendVerification(email) {
+    const supabase = getSupabase();
+    if (!supabase) return { error: 'Supabase is not configured.' };
+    const cleanEmail = (email || '').trim();
+    const { error } = await supabase.auth.resend({
+      type: 'signup',
+      email: cleanEmail,
+    });
+    return { error: error ? error.message : null };
   }
 
   /**

@@ -3,8 +3,7 @@
  *
  * Reusable sign-in / sign-up overlay modal with glass-morphism design.
  * Opens as a centered overlay and provides email/password authentication
- * via Supabase Auth. Used by the print/download flow to gate downloads
- * behind authentication.
+ * via Supabase Auth. Enforces email verification before allowing access.
  */
 
 import { authService } from '../utils/auth-service.js';
@@ -12,7 +11,7 @@ import { escapeHTML } from '../utils/security.js';
 
 /**
  * Shows the auth modal overlay. Returns a promise that resolves when
- * the user successfully signs in/up, or rejects if they close the modal.
+ * the user successfully signs in, or rejects if they close the modal.
  *
  * @param {object} [options]
  * @param {string} [options.title] - Modal title
@@ -23,7 +22,7 @@ import { escapeHTML } from '../utils/security.js';
 export function showAuthModal(options = {}) {
   const {
     title = 'Sign In to Continue',
-    subtitle = 'Create a free account or sign in to download your solution.',
+    subtitle = 'Create a verified account or sign in to download your solution.',
     initialMode = 'signin',
   } = options;
 
@@ -33,6 +32,7 @@ export function showAuthModal(options = {}) {
     if (existing) existing.remove();
 
     let mode = initialMode;
+    let savedEmail = '';
 
     const overlay = document.createElement('div');
     overlay.id = 'auth-modal-overlay';
@@ -44,6 +44,76 @@ export function showAuthModal(options = {}) {
       animation: authModalFadeIn 0.25s ease;
       padding: 16px;
     `;
+
+    function renderVerificationNotice(email) {
+      overlay.innerHTML = `
+        <div class="auth-modal-card" style="text-align: center; display: flex; flex-direction: column; gap: 16px;">
+          <!-- Close Button -->
+          <div style="display: flex; justify-content: flex-end; margin: -12px -12px 0 0;">
+            <button id="auth-modal-close" style="background: none; border: none; color: var(--text-muted, #64748B); font-size: 1.4rem; cursor: pointer; padding: 4px 8px; border-radius: 8px;">✕</button>
+          </div>
+
+          <div style="width: 60px; height: 60px; margin: 0 auto 4px; border-radius: 18px; background: rgba(59, 130, 246, 0.15); display: flex; align-items: center; justify-content: center; font-size: 2rem;">
+            ✉️
+          </div>
+
+          <h2 style="font-size: 1.5rem; font-weight: 800; color: #F8FAFC; margin: 0;">Verify Your Email</h2>
+          
+          <p style="color: #94A3B8; font-size: 0.95rem; margin: 0; line-height: 1.5;">
+            We've sent a confirmation link to:<br/>
+            <strong style="color: #60A5FA; font-size: 1.05rem; word-break: break-all;">${escapeHTML(email)}</strong>
+          </p>
+
+          <div style="background: rgba(255, 255, 255, 0.04); border: 1px dashed var(--border-subtle, rgba(255,255,255,0.1)); padding: 12px 14px; border-radius: 10px; font-size: 0.85rem; color: #94A3B8; text-align: left; line-height: 1.4;">
+            👉 <strong>Next steps:</strong><br/>
+            1. Open the verification email in your inbox.<br/>
+            2. Click the confirmation link.<br/>
+            3. Return here and sign in with your credentials.<br/>
+            <span style="color: #FBBF24; font-size: 0.8rem; margin-top: 4px; display: block;">💡 Check your <strong>Spam / Junk</strong> folder if you don't see it within 2 minutes.</span>
+          </div>
+
+          <div id="resend-status-msg" style="display: none; font-size: 0.85rem; color: #34D399;"></div>
+
+          <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 8px;">
+            <button id="auth-goto-signin" class="btn btn-primary" style="width: 100%; padding: 12px; font-weight: 700;">
+              I've Verified — Proceed to Sign In
+            </button>
+            <button id="auth-resend-btn" class="btn btn-secondary btn-sm" style="width: 100%; padding: 8px; font-size: 0.85rem;">
+              Resend Verification Email
+            </button>
+          </div>
+        </div>
+      `;
+
+      overlay.querySelector('#auth-modal-close').addEventListener('click', () => {
+        overlay.remove();
+        reject(new Error('Auth modal closed by user'));
+      });
+
+      overlay.querySelector('#auth-goto-signin').addEventListener('click', () => {
+        mode = 'signin';
+        savedEmail = email;
+        renderForm();
+      });
+
+      overlay.querySelector('#auth-resend-btn').addEventListener('click', async () => {
+        const btn = overlay.querySelector('#auth-resend-btn');
+        const status = overlay.querySelector('#resend-status-msg');
+        btn.disabled = true;
+        btn.textContent = 'Resending…';
+        const res = await authService.resendVerification(email);
+        if (res.error) {
+          status.textContent = res.error;
+          status.style.color = '#F87171';
+        } else {
+          status.textContent = '✓ Verification email resent! Please check your inbox.';
+          status.style.color = '#34D399';
+        }
+        status.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'Resend Verification Email';
+      });
+    }
 
     function renderForm() {
       const isSignUp = mode === 'signup';
@@ -60,7 +130,7 @@ export function showAuthModal(options = {}) {
           }
           .auth-modal-card {
             width: 100%; max-width: 440px;
-            background: rgba(15, 23, 42, 0.92);
+            background: rgba(15, 23, 42, 0.94);
             border: 1px solid rgba(255, 255, 255, 0.08);
             border-radius: 20px;
             padding: 32px;
@@ -92,6 +162,7 @@ export function showAuthModal(options = {}) {
             background: rgba(239, 68, 68, 0.12);
             border: 1px solid rgba(239, 68, 68, 0.3);
             padding: 8px 12px; border-radius: 8px;
+            line-height: 1.4;
           }
           .auth-modal-toggle {
             color: #60A5FA; cursor: pointer; font-weight: 600;
@@ -120,7 +191,7 @@ export function showAuthModal(options = {}) {
               ${escapeHTML(isSignUp ? 'Create Your Account' : title)}
             </h2>
             <p style="color: #94A3B8; font-size: 0.9rem; margin-top: 6px;">
-              ${escapeHTML(isSignUp ? 'Sign up to download solutions and track your history.' : subtitle)}
+              ${escapeHTML(isSignUp ? 'Sign up with a real email to verify and download solutions.' : subtitle)}
             </p>
           </div>
 
@@ -134,8 +205,8 @@ export function showAuthModal(options = {}) {
             ` : ''}
 
             <div style="display: flex; flex-direction: column; gap: 5px;">
-              <label style="font-size: 0.82rem; font-weight: 600; color: #94A3B8;">Email</label>
-              <input type="email" id="auth-email" required placeholder="you@example.com" autocomplete="email" />
+              <label style="font-size: 0.82rem; font-weight: 600; color: #94A3B8;">Email Address</label>
+              <input type="email" id="auth-email" required placeholder="you@example.com" autocomplete="email" value="${escapeHTML(savedEmail)}" />
             </div>
 
             <div style="display: flex; flex-direction: column; gap: 5px;">
@@ -147,7 +218,7 @@ export function showAuthModal(options = {}) {
             <div id="auth-modal-error" class="auth-modal-error"></div>
 
             <button type="submit" id="auth-modal-submit" class="btn btn-primary" style="width: 100%; margin-top: 4px; padding: 12px; font-size: 1rem; font-weight: 700; border-radius: 12px;">
-              ${isSignUp ? 'Create Account' : 'Sign In'}
+              ${isSignUp ? 'Create Account & Verify' : 'Sign In'}
             </button>
           </form>
 
@@ -169,13 +240,14 @@ export function showAuthModal(options = {}) {
 
       overlay.querySelector('#auth-toggle').addEventListener('click', () => {
         mode = mode === 'signin' ? 'signup' : 'signin';
+        savedEmail = overlay.querySelector('#auth-email')?.value || savedEmail;
         renderForm();
       });
 
       const form = overlay.querySelector('#auth-modal-form');
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
-        const email = overlay.querySelector('#auth-email').value;
+        const email = overlay.querySelector('#auth-email').value.trim();
         const password = overlay.querySelector('#auth-password').value;
         const displayName = overlay.querySelector('#auth-display-name')?.value || '';
         const errorEl = overlay.querySelector('#auth-modal-error');
@@ -196,7 +268,10 @@ export function showAuthModal(options = {}) {
           errorEl.textContent = result.error;
           errorEl.style.display = 'block';
           submitBtn.disabled = false;
-          submitBtn.textContent = mode === 'signup' ? 'Create Account' : 'Sign In';
+          submitBtn.textContent = mode === 'signup' ? 'Create Account & Verify' : 'Sign In';
+        } else if (result.needsEmailVerification) {
+          // Email confirmation is required! Show the verification notice
+          renderVerificationNotice(email);
         } else {
           overlay.remove();
           resolve(result.user);
