@@ -1,18 +1,5 @@
 -- ============================================================================
 -- RuBiX CUBE — Supabase schema + Row Level Security policies
---
--- Run this once in your Supabase project's SQL Editor (Dashboard → SQL Editor
--- → New query → paste all of this → Run). Safe to re-run: uses IF NOT EXISTS
--- / DROP POLICY IF EXISTS guards.
---
--- WHY THIS IS THE ACTUAL SECURITY BOUNDARY:
--- The app talks to Supabase directly from the browser using the public
--- "anon" key — that key is NOT a secret (Supabase designs it to be public;
--- it identifies the project, it doesn't grant access by itself). Access is
--- controlled entirely by the Row Level Security (RLS) policies below, which
--- run inside Postgres and can't be bypassed from client JS no matter what a
--- visitor edits in devtools. That's what makes this different from the old
--- scheme, where the "check" itself shipped to the browser.
 -- ============================================================================
 
 -- ── profiles: metadata for signed-up users ─────────────────────────────────
