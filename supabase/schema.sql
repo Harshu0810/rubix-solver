@@ -8,8 +8,13 @@ create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   email text,
   display_name text check (length(display_name) <= 100),
+  is_admin boolean not null default false,
   created_at timestamptz not null default now()
 );
+
+-- Safe to re-run on a database created from an earlier version of this file,
+-- which didn't have this column yet.
+alter table public.profiles add column if not exists is_admin boolean not null default false;
 
 -- Trigger function: copies email and optional display_name from auth metadata
 create or replace function public.handle_new_user()
@@ -73,14 +78,40 @@ create table if not exists public.feedback (
 
 -- ============================================================================
 -- Row Level Security
+--
+-- IMPORTANT — this replaces an earlier version of this file where every
+-- "admin" policy below was written as `using (true)`, which really meant
+-- "any signed-in user" rather than "the admin". Since regular visitors can
+-- sign up (to unlock downloads), that let any registered account read every
+-- row of sessions/events/solves/feedback/profiles — including every other
+-- user's email address — by querying the tables directly, regardless of
+-- what the admin.js page in the UI checked. Admin status now depends on the
+-- `profiles.is_admin` column below, not just "authenticated".
+--
+-- After running this file, make yourself the admin (Supabase dashboard →
+-- Table Editor → profiles → find your row by email → set is_admin to true).
+-- Only ever flip this on for accounts you control.
+--
 -- Rule of thumb applied everywhere below:
 --   - "anon" (any visitor, signed in or not) may INSERT telemetry.
 --   - "authenticated" users may INSERT with their user_id attached.
---   - Only the admin (authenticated via Supabase Auth) may SELECT or DELETE.
---     There is no public signup restriction — regular users can sign up,
---     but the admin is distinguished by email check in the app layer.
---     All authenticated users can read their OWN profiles row.
+--   - Only a profile with is_admin = true may SELECT or DELETE the tables
+--     below. Every other signed-in user can only read their OWN profile row.
 -- ============================================================================
+
+-- Helper used inside RLS policies to check "is this request's user an
+-- admin?". SECURITY DEFINER + querying profiles directly (rather than going
+-- through the profiles table's own RLS) is required here, otherwise the
+-- profiles SELECT policy calling this function would recurse into itself.
+create or replace function public.is_admin(uid uuid)
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select coalesce((select is_admin from public.profiles where id = uid), false);
+$$;
 
 -- ── profiles RLS ────────────────────────────────────────────────────────────
 alter table public.profiles enable row level security;
@@ -91,7 +122,7 @@ create policy "users can read own profile" on public.profiles
 
 drop policy if exists "admin can read all profiles" on public.profiles;
 create policy "admin can read all profiles" on public.profiles
-  for select to authenticated using (true);
+  for select to authenticated using (public.is_admin(auth.uid()));
 
 -- ── sessions RLS ────────────────────────────────────────────────────────────
 alter table public.sessions enable row level security;
@@ -102,7 +133,7 @@ create policy "anon can insert sessions" on public.sessions
 
 drop policy if exists "admin can read sessions" on public.sessions;
 create policy "admin can read sessions" on public.sessions
-  for select to authenticated using (true);
+  for select to authenticated using (public.is_admin(auth.uid()));
 
 -- ── events RLS ──────────────────────────────────────────────────────────────
 alter table public.events enable row level security;
@@ -113,7 +144,7 @@ create policy "anon can insert events" on public.events
 
 drop policy if exists "admin can read events" on public.events;
 create policy "admin can read events" on public.events
-  for select to authenticated using (true);
+  for select to authenticated using (public.is_admin(auth.uid()));
 
 -- ── solves RLS ──────────────────────────────────────────────────────────────
 alter table public.solves enable row level security;
@@ -124,7 +155,7 @@ create policy "anon can insert solves" on public.solves
 
 drop policy if exists "admin can read solves" on public.solves;
 create policy "admin can read solves" on public.solves
-  for select to authenticated using (true);
+  for select to authenticated using (public.is_admin(auth.uid()));
 
 -- ── feedback RLS ────────────────────────────────────────────────────────────
 alter table public.feedback enable row level security;
@@ -135,15 +166,15 @@ create policy "anon can insert feedback" on public.feedback
 
 drop policy if exists "admin can read feedback" on public.feedback;
 create policy "admin can read feedback" on public.feedback
-  for select to authenticated using (true);
+  for select to authenticated using (public.is_admin(auth.uid()));
 
 drop policy if exists "admin can delete feedback" on public.feedback;
 create policy "admin can delete feedback" on public.feedback
-  for delete to authenticated using (true);
+  for delete to authenticated using (public.is_admin(auth.uid()));
 
 drop policy if exists "admin can delete solves" on public.solves;
 create policy "admin can delete solves" on public.solves
-  for delete to authenticated using (true);
+  for delete to authenticated using (public.is_admin(auth.uid()));
 
 -- No UPDATE policies are created anywhere — nobody can edit existing rows,
 -- including the admin, which is fine for an append-only telemetry log.

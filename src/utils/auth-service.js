@@ -4,19 +4,25 @@
  * Wraps Supabase Auth to provide a clean API for:
  * - User sign-up / sign-in / sign-out
  * - Session state tracking
- * - Admin role detection (by email match against VITE_ADMIN_EMAIL)
+ * - Admin role detection
+ *
+ * Admin status is read from `profiles.is_admin` (checked server-side by
+ * Postgres Row Level Security — see supabase/schema.sql), NOT from
+ * comparing the signed-in email against a public env var. An email string
+ * baked into the client bundle can only ever be a UI convenience; it can't
+ * be the actual access control, since anyone can read it out of the bundle
+ * and it says nothing about which *account* Postgres will actually trust.
  *
  * Falls back to a no-op offline mode when Supabase isn't configured.
  */
 
 import { getSupabase, isSupabaseConfigured } from './supabase-client.js';
 
-const ADMIN_EMAIL = (import.meta.env.VITE_ADMIN_EMAIL || '').toLowerCase().trim();
-
 class AuthService {
   constructor() {
     /** @type {import('@supabase/supabase-js').User | null} */
     this._user = null;
+    this._isAdmin = false;
     this._listeners = new Set();
     this._initialized = false;
   }
@@ -35,12 +41,28 @@ class AuthService {
     // Read persisted session
     const { data } = await supabase.auth.getSession();
     this._user = data.session?.user ?? null;
+    await this._refreshAdminFlag();
 
     // Listen for auth state changes (sign-in, sign-out, token refresh)
-    supabase.auth.onAuthStateChange((_event, session) => {
+    supabase.auth.onAuthStateChange(async (_event, session) => {
       this._user = session?.user ?? null;
+      await this._refreshAdminFlag();
       this._notifyListeners();
     });
+  }
+
+  /** @private Re-reads this user's own profile row to cache is_admin. */
+  async _refreshAdminFlag() {
+    this._isAdmin = false;
+    if (!this._user) return;
+    const supabase = getSupabase();
+    if (!supabase) return;
+    const { data } = await supabase
+      .from('profiles')
+      .select('is_admin')
+      .eq('id', this._user.id)
+      .single();
+    this._isAdmin = !!data?.is_admin;
   }
 
   /**
@@ -66,6 +88,7 @@ class AuthService {
 
     if (error) return { user: null, error: error.message };
     this._user = data.user;
+    await this._refreshAdminFlag();
     this._notifyListeners();
     return { user: data.user, error: null };
   }
@@ -87,6 +110,7 @@ class AuthService {
 
     if (error) return { user: null, error: error.message };
     this._user = data.user;
+    await this._refreshAdminFlag();
     this._notifyListeners();
     return { user: data.user, error: null };
   }
@@ -99,6 +123,7 @@ class AuthService {
     if (!supabase) return;
     await supabase.auth.signOut();
     this._user = null;
+    this._isAdmin = false;
     this._notifyListeners();
   }
 
@@ -118,13 +143,13 @@ class AuthService {
   }
 
   /**
-   * Returns true if the current signed-in user is the admin.
-   * Admin is identified by email matching VITE_ADMIN_EMAIL.
+   * Returns true if the current signed-in user's profile has is_admin set.
+   * This mirrors (but does not replace) the Postgres RLS check of the same
+   * name — this cached copy is only for deciding what the UI shows; the
+   * database enforces the real rule independently on every query.
    */
   isAdmin() {
-    if (!this._user) return false;
-    if (!ADMIN_EMAIL) return false;
-    return this._user.email?.toLowerCase().trim() === ADMIN_EMAIL;
+    return this._isAdmin;
   }
 
   /**

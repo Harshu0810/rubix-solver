@@ -34,7 +34,18 @@ export async function renderAdminPage(container, router) {
       return sessionStorage.getItem('rubix_offline_admin') === 'true';
     }
     const { data } = await supabase.auth.getSession();
-    return !!data.session;
+    if (!data.session) return false;
+
+    // Being signed in only proves you're a registered user, not the admin —
+    // anyone can create a regular account. Check the actual is_admin flag on
+    // this user's own profile row (readable under RLS since it's their own).
+    const { data: profile, error } = await supabase
+      .from('profiles')
+      .select('is_admin')
+      .eq('id', data.session.user.id)
+      .single();
+    if (error) return false;
+    return !!profile?.is_admin;
   }
 
   async function render() {
@@ -119,9 +130,20 @@ export async function renderAdminPage(container, router) {
 
       if (error) {
         renderLogin(error.message || 'Invalid email or password.');
-      } else {
-        await render();
+        return;
       }
+
+      // Credentials were valid, but that only proves this is a registered
+      // account — not that it's the admin's. Check that explicitly before
+      // granting access, and don't leave a non-admin account signed in here.
+      const isAdmin = await checkAdminAuth();
+      if (!isAdmin) {
+        await supabase.auth.signOut();
+        renderLogin('This account does not have admin access.');
+        return;
+      }
+
+      await render();
     });
 
     container.querySelector('#btn-preview-offline')?.addEventListener('click', async () => {
