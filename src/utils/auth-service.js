@@ -154,6 +154,33 @@ class AuthService {
   }
 
   /**
+   * Sign in or sign up with Google OAuth.
+   * Redirects user to Google OAuth consent screen.
+   * @param {string} [redirectTo]
+   * @returns {Promise<{error: string|null}>}
+   */
+  async signInWithGoogle(redirectTo) {
+    const supabase = getSupabase();
+    if (!supabase) return { error: 'Supabase is not configured.' };
+
+    const targetUrl = redirectTo || (window.location.origin + window.location.pathname);
+
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: targetUrl,
+        queryParams: {
+          access_type: 'offline',
+          prompt: 'select_account',
+        },
+      },
+    });
+
+    if (error) return { error: error.message };
+    return { error: null };
+  }
+
+  /**
    * Resend a verification email to a registered user.
    */
   async resendVerification(email) {
